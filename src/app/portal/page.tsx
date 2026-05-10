@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
+import { supabase } from "@/lib/supabase";
 
 const ADMIN_PASSWORD = "rpm@admin2024";
 
@@ -50,7 +51,9 @@ export default function AdminPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState("");
   const [imagePreview, setImagePreview] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const { properties, addProperty, deleteProperty, updateProperty } = useProperties();
@@ -67,6 +70,11 @@ export default function AdminPage() {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    
+    // Save the actual file for upload later
+    setImageFile(file);
+    
+    // Create a temporary preview URL
     const url = URL.createObjectURL(file);
     setImagePreview(url);
     setForm((f) => ({ ...f, image: url }));
@@ -79,29 +87,73 @@ export default function AdminPage() {
 
   const confirmDelete = (id: string) => setDeleteConfirmId(id);
 
-  const handleConfirmedDelete = () => {
+  const handleConfirmedDelete = async () => {
     if (deleteConfirmId) {
-      deleteProperty(deleteConfirmId);
-      setDeleteConfirmId(null);
-      showSuccess("Property deleted successfully!");
+      try {
+        await deleteProperty(deleteConfirmId);
+        setDeleteConfirmId(null);
+        showSuccess("Property deleted successfully!");
+      } catch (err) {
+        console.error(err);
+      }
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title || !form.location || !form.price) return;
 
-    if (editingId) {
-      updateProperty(editingId, form);
-      showSuccess("Property updated successfully!");
-      setEditingId(null);
-    } else {
-      addProperty(form);
-      showSuccess("Property added successfully!");
+    setIsSubmitting(true);
+    let finalImageUrl = form.image;
+
+    try {
+      // 1. Upload image to Supabase if there's a new file
+      if (imageFile) {
+        const fileExt = imageFile.name.split('.').pop();
+        const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+        
+        const { error: uploadError } = await supabase.storage
+          .from('property-images')
+          .upload(fileName, imageFile);
+
+        if (uploadError) {
+          console.error("Upload error details:", uploadError);
+          alert("Image upload failed! Please make sure you created the 'property-images' bucket in Supabase and made it public.");
+          setIsSubmitting(false);
+          return;
+        }
+
+        // Get the public URL for the uploaded image
+        const { data: { publicUrl } } = supabase.storage
+          .from('property-images')
+          .getPublicUrl(fileName);
+          
+        finalImageUrl = publicUrl;
+      }
+
+      const finalForm = { ...form, image: finalImageUrl };
+
+      // 2. Save property data to database
+      if (editingId) {
+        await updateProperty(editingId, finalForm);
+        showSuccess("Property updated successfully!");
+        setEditingId(null);
+      } else {
+        await addProperty(finalForm);
+        showSuccess("Property added successfully!");
+      }
+      
+      // 3. Reset form
+      setForm(emptyForm);
+      setImagePreview("");
+      setImageFile(null);
+      setActiveTab("manage");
+    } catch (err) {
+      console.error(err);
+      alert("An error occurred while saving the property.");
+    } finally {
+      setIsSubmitting(false);
     }
-    setForm(emptyForm);
-    setImagePreview("");
-    setActiveTab("manage");
   };
 
   const startEdit = (property: Property) => {
@@ -119,6 +171,7 @@ export default function AdminPage() {
       featured: property.featured,
     });
     setImagePreview(property.image);
+    setImageFile(null); // Reset any pending file
     setEditingId(property.id);
     setActiveTab("add");
   };
@@ -486,9 +539,16 @@ export default function AdminPage() {
               <div className="md:col-span-2">
                 <button
                   type="submit"
-                  className="flex items-center gap-3 bg-rpm-gold text-black px-10 py-4 rounded-xl font-medium uppercase tracking-widest hover:bg-white transition-colors"
+                  disabled={isSubmitting}
+                  className="flex items-center gap-3 bg-rpm-gold text-black px-10 py-4 rounded-xl font-medium uppercase tracking-widest hover:bg-white transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
                 >
-                  {editingId ? <><Save className="w-5 h-5" /> Update Property</> : <><Plus className="w-5 h-5" /> Publish Property</>}
+                  {isSubmitting ? (
+                    <span className="flex items-center gap-2">Processing...</span>
+                  ) : editingId ? (
+                    <><Save className="w-5 h-5" /> Update Property</>
+                  ) : (
+                    <><Plus className="w-5 h-5" /> Publish Property</>
+                  )}
                 </button>
               </div>
             </form>

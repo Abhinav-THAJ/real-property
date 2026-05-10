@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
 
 export interface Property {
   id: string;
@@ -20,9 +21,11 @@ export interface Property {
 
 interface PropertyContextType {
   properties: Property[];
-  addProperty: (property: Omit<Property, "id" | "createdAt">) => void;
-  deleteProperty: (id: string) => void;
-  updateProperty: (id: string, property: Partial<Property>) => void;
+  loading: boolean;
+  addProperty: (property: Omit<Property, "id" | "createdAt">) => Promise<void>;
+  deleteProperty: (id: string) => Promise<void>;
+  updateProperty: (id: string, property: Partial<Property>) => Promise<void>;
+  refreshProperties: () => Promise<void>;
 }
 
 const PropertyContext = createContext<PropertyContextType | null>(null);
@@ -121,51 +124,112 @@ const DEFAULT_PROPERTIES: Property[] = [
 ];
 
 export function PropertyProvider({ children }: { children: React.ReactNode }) {
-  const [properties, setProperties] = useState<Property[]>(DEFAULT_PROPERTIES);
+  const [properties, setProperties] = useState<Property[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchProperties = async () => {
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from("properties")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        const mappedData: Property[] = data.map((p: any) => ({
+          ...p,
+          createdAt: p.created_at,
+        }));
+        setProperties(mappedData);
+      } else {
+        setProperties(DEFAULT_PROPERTIES);
+      }
+    } catch (err) {
+      console.error("Error fetching properties:", err);
+      setProperties(DEFAULT_PROPERTIES);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const stored = localStorage.getItem("rpm_properties");
-    if (stored) {
-      try {
-        const parsed: Property[] = JSON.parse(stored);
-        // Use the full stored list (includes any admin edits/deletes)
-        setProperties(parsed);
-      } catch {
-        // ignore parse errors, fall back to defaults
-      }
-    } else {
-      // First visit: persist the defaults so future deletes are tracked
-      localStorage.setItem("rpm_properties", JSON.stringify(DEFAULT_PROPERTIES));
-    }
+    fetchProperties();
   }, []);
 
-  const persist = (props: Property[]) => {
-    localStorage.setItem("rpm_properties", JSON.stringify(props));
-    setProperties(props);
+  const addProperty = async (property: Omit<Property, "id" | "createdAt">) => {
+    try {
+      const { data, error } = await supabase
+        .from("properties")
+        .insert([
+          {
+            title: property.title,
+            location: property.location,
+            price: property.price,
+            type: property.type,
+            category: property.category,
+            beds: property.beds,
+            baths: property.baths,
+            area: property.area,
+            description: property.description,
+            image: property.image,
+            featured: property.featured,
+          },
+        ])
+        .select();
+
+      if (error) throw error;
+      await fetchProperties();
+    } catch (err) {
+      console.error("Error adding property:", err);
+      throw err;
+    }
   };
 
-  const addProperty = (property: Omit<Property, "id" | "createdAt">) => {
-    const newProp: Property = {
-      ...property,
-      id: `admin-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    };
-    const updated = [...properties, newProp];
-    persist(updated);
+  const deleteProperty = async (id: string) => {
+    try {
+      if (id.startsWith("default-")) {
+        setProperties((prev) => prev.filter((p) => p.id !== id));
+        return;
+      }
+
+      const { error } = await supabase.from("properties").delete().eq("id", id);
+      if (error) throw error;
+      await fetchProperties();
+    } catch (err) {
+      console.error("Error deleting property:", err);
+      throw err;
+    }
   };
 
-  const deleteProperty = (id: string) => {
-    const updated = properties.filter((p) => p.id !== id);
-    persist(updated);
-  };
+  const updateProperty = async (id: string, updates: Partial<Property>) => {
+    try {
+      if (id.startsWith("default-")) {
+        setProperties((prev) => prev.map((p) => (p.id === id ? { ...p, ...updates } : p)));
+        return;
+      }
 
-  const updateProperty = (id: string, updates: Partial<Property>) => {
-    const updated = properties.map((p) => (p.id === id ? { ...p, ...updates } : p));
-    persist(updated);
+      const { error } = await supabase.from("properties").update(updates).eq("id", id);
+      if (error) throw error;
+      await fetchProperties();
+    } catch (err) {
+      console.error("Error updating property:", err);
+      throw err;
+    }
   };
 
   return (
-    <PropertyContext.Provider value={{ properties, addProperty, deleteProperty, updateProperty }}>
+    <PropertyContext.Provider
+      value={{
+        properties,
+        loading,
+        addProperty,
+        deleteProperty,
+        updateProperty,
+        refreshProperties: fetchProperties,
+      }}
+    >
       {children}
     </PropertyContext.Provider>
   );
